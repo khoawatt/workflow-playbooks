@@ -1,0 +1,4 @@
+interface:
+  display_name: "Command Code tmux Consult"
+  short_description: "Consult Command Code safely in a tmux pane"
+  default_prompt: "Use $cmdc-tmux-consult to ask Command Code about this repository in an idle tmux pane, then review its findings."
