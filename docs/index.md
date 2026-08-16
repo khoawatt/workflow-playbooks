@@ -21,7 +21,6 @@ grows.
 - [Deployment](./deployment/)
 - [Interview](./interview/)
 - [SEO](./seo/)
-- [Skills](../skills/)
 - [Templates](../templates/)
 - [Meta](../meta/)
 

@@ -42,16 +42,6 @@ feaon-production-seo-gsc-analytics-ads-tech-check-plan.md
 
 Generic, reusable documents do not need a project prefix.
 
-## Skills
-
-Skills live under `skills/<skill-name>/` and are tools with runnable scripts,
-configs, or skill definitions, not ordinary Markdown documents. Keep their
-internal structure and entrypoints unchanged unless a reference actually
-breaks. When moving a skill, move the whole folder and re-check every reference
-to the old path (including symlinks and config outside this repo). Skill
-definition files keep their required names (for example `SKILL.md`) even though
-they do not follow the `lowercase-kebab-case.md` rule.
-
 ## Examples
 
 ```text

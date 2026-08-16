@@ -3,7 +3,7 @@
 Personal engineering workflow and operational playbook library.
 
 This repository stores reusable workflows, guides, architecture notes,
-deployment runbooks, AI-agent playbooks, SEO procedures, and supporting skills.
+deployment runbooks, AI-agent playbooks, and SEO procedures.
 
 Start here: [Documentation Index](./docs/index.md)
 
@@ -22,15 +22,8 @@ jump straight to a category.
 | Deployment | Deployment runbooks and SOPs | [docs/deployment](./docs/deployment/) |
 | Interview | Interview preparation materials | [docs/interview](./docs/interview/) |
 | SEO | SEO, Search Console, analytics, sitemap procedures | [docs/seo](./docs/seo/) |
-| Skills | Tools/skills with runnable scripts or skill definitions | [skills](./skills/) |
 | Templates | Templates for new documents | [templates](./templates/) |
 | Meta | Library conventions and maintenance notes | [meta](./meta/) |
-
-## Skills
-
-- [cmdc-tmux-consult](./skills/cmdc-tmux-consult/) — safely ask Command Code
-  about a repository from an idle tmux pane, with literal prompt delivery and
-  completion evidence.
 
 ## Naming convention
 
