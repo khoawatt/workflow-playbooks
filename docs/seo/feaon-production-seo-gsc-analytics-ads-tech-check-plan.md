@@ -1,6 +1,6 @@
 # Feaon Production SEO, Search Console, Analytics & Ads Tech-Check Plan
 
-**Repository:** `Akbi47/Feaon-ldp-v2`\
+**Repository:** `khoawatt/Feaon-ldp-v2`\
 **Baseline:** after PR #28 merge (`a5e0ffadd30bf8e09da3d15d7858a58798e97973`)\
 **Purpose:** provide a durable, executable handoff for Codex to verify production SEO, prepare Search Console/analytics/Ads measurement work, and stop at the correct human-only boundaries.
 
@@ -63,7 +63,7 @@ Known merge commit at time of this plan:
 
 ```text
 a5e0ffadd30bf8e09da3d15d7858a58798e97973
-Merge pull request #28 from Akbi47/docs/issue-27-seo-guide
+Merge pull request #28 from khoawatt/docs/issue-27-seo-guide
 ```
 
 ### PASS criteria

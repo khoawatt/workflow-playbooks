@@ -18,7 +18,7 @@ Bao phủ các tín hiệu mà GitHub Community Profile đánh giá và người
 - Có quyền `admin`/`maintain` trên repo (để PATCH description/topics).
 - Đã cài `gh` CLI và đăng nhập: `gh auth status` phải `Logged in` với token có scope `repo`.
 - Local clone đã có `user.name`/`user.email` (vd `audition-mld <293917115+audition-mld@users.noreply.github.com>`).
-- Quyết định license chung (chuẩn hiện tại: `MIT 2026 Quách Võ Anh Khoa (khoawatt)`; private repo có thể ghi `MIT 2026 Quách Võ Anh Khoa (khoawatt) / Akbi47`).
+- Quyết định license chung (chuẩn hiện tại: `MIT 2026 Quách Võ Anh Khoa (khoawatt)`).
 
 ## Workflow
 
@@ -59,14 +59,14 @@ done
 | 4 | **LICENSE** | `community/files.license` + `license.spdx_id` | `gh api repos/$repo/license` + `ls LICENSE` | File `LICENSE` MIT ở root, `spdx_id: MIT`, community health nhận diện |
 | 5 | **README.md** | `community/files.readme` | `gh api repos/$repo/contents/README.md` | Có `## Contributing`, `## Authors & Contributors`, `## License`, `## Security` (link tới file tương ứng) |
 | 6 | **CONTRIBUTING.md** | `community/files.contributing` | `ls CONTRIBUTING.md` | Hướng dẫn setup, PR guidelines, link CODE_OF_CONDUCT/SECURITY, ghi Author & Maintainer |
-| 7 | **CODE_OF_CONDUCT.md** | `community/files.code_of_conduct` | `ls CODE_OF_CONDUCT.md` | Dựa trên Contributor Covenant 2.1, nêu contact `@khoawatt`/`@Akbi47` |
+| 7 | **CODE_OF_CONDUCT.md** | `community/files.code_of_conduct` | `ls CODE_OF_CONDUCT.md` | Dựa trên Contributor Covenant 2.1, nêu contact `@khoawatt` |
 | 8 | **SECURITY.md** | (health, không hiện trực tiếp trong community/files nhưng được tính) | `ls SECURITY.md` | Bảng Supported Versions + hướng dẫn private advisory (`/security/advisories/new`), lưu ý secrets-free |
 | 9 | **.github/pull_request_template.md** | `community/files.pull_request_template` | `ls .github/pull_request_template.md` | Gồm Description/Changes/Verification checklist |
 | 10 | **.github/ISSUE_TEMPLATE/** | `community/files.issue_template` | `ls .github/ISSUE_TEMPLATE/` | Ít nhất `bug_report.yml` và `feature_request.yml` (GitHub Forms) |
 | 11 | **package.json (nếu là Node/JS repo)** | Không tính health nhưng ảnh hưởng About & discoverability | `cat package.json` | Có `name`, `description` (= repo description), `repository.url`, `keywords` (trùng topics), `author`, `license: MIT`, `scripts.test` |
 | 12 | **Contributors & Visibility** | `contributors_url` + `visibility` | `git log --format="%an <%ae>" | sort -u` và `gh api repos/$repo --jq .visibility` | `git log` ghi đúng Author (không anonymous), README liệt kê Authors, `visibility` đúng ý đồ (public vs private), `has_issues: true` |
 
-> Lưu ý các repo đã chuyển owner (ví dụ `Akbi47/openclaw-setup` → `khoawatt/openclaw-setup`): luôn kiểm tra `git remote -v` và sửa `git remote set-url origin https://github.com/khoawatt/<repo>.git` để push không lệch owner.
+> Lưu ý nếu repo từng ở owner cũ: luôn kiểm tra `git remote -v` và sửa `git remote set-url origin https://github.com/khoawatt/<repo>.git` để push không lệch owner.
 
 Trường hợp đặc biệt: thư mục như `ai-os-v1.6` chỉ chứa `ai-os-v1.6.zip` và không có `.git` — không audit được bằng `gh api`; cần `git init` + tạo repo mới nếu muốn đưa lên GitHub.
 
@@ -146,7 +146,7 @@ Dự án được phân phối dưới giấy phép **MIT License**. Xem [LICENS
 Xem [SECURITY.md](SECURITY.md) để báo cáo lỗ hổng.
 ```
 
-Sửa thêm `git clone` URL nếu README cũ còn `Akbi47/...` → `khoawatt/...`.
+Sửa thêm `git clone` URL nếu README cũ còn owner cũ → `khoawatt/...`.
 
 #### 3.4 package.json (nếu có)
 
@@ -179,7 +179,7 @@ git commit -m "docs: add GitHub metadata, license, contributor guidelines and pa
 git push origin main
 ```
 
-Nếu remote còn trỏ `Akbi47/...`:
+Nếu remote còn trỏ owner cũ:
 
 ```bash
 git remote set-url origin https://github.com/khoawatt/<repo>.git
@@ -223,8 +223,8 @@ gh api "repos/khoawatt/<repo>" --jq '{license: .license.spdx_id, topics, descrip
 |-------------|-------------|-----------|
 | `gh api repos/.../license` → 404 | Thiếu `LICENSE` ở root hoặc chưa push | Thêm `LICENSE` MIT và push, đợi GitHub index 1–2 phút |
 | `health_percentage` vẫn <100 sau khi thêm file | Tên file sai case (`licence`, `Contributing.md`) hoặc đặt sai thư mục (`.github` thiếu) | Đặt đúng `LICENSE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `.github/pull_request_template.md`, `.github/ISSUE_TEMPLATE/*.yml` ở root |
-| `git push` báo `remote: Repository not found` | Remote còn `Akbi47/...` trong khi repo đã chuyển sang `khoawatt/...` | `git remote set-url origin https://github.com/khoawatt/<repo>.git` |
-| `gh auth status` báo `Not Found` cho `Akbi47/...` | Token hiện tại không có quyền trên org cũ | `gh auth switch --user Akbi47` (token thực tế map tới `khoawatt`) rồi retry |
+| `git push` báo `remote: Repository not found` | Remote còn owner cũ trong khi repo đã chuyển sang `khoawatt/...` | `git remote set-url origin https://github.com/khoawatt/<repo>.git` |
+| `gh auth status` báo `Not Found` cho `khoawatt/...` | Token hiện tại không có quyền trên owner cũ | `gh auth switch --user khoawatt` (token thực tế map tới `khoawatt`) rồi retry |
 | `ai-os-v1.6` báo `not a git repository` | Thư mục chỉ chứa zip, chưa `git init` | Giải nén, `git init`, tạo repo mới hoặc import vào repo hiện có |
 
 ## References
