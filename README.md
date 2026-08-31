@@ -43,3 +43,28 @@ are lowercased (`seo`, `gsc`, `cms`, `api`, `ai`, `tmux`, `codex`, `nextjs`,
    [naming conventions](./meta/naming-conventions.md)).
 4. Add one row to [docs/index.md](./docs/index.md) with category, purpose, and
    when to use it.
+
+---
+
+## Đóng góp (Contributing)
+
+Mọi đóng góp đều được hoan nghênh. Vui lòng xem [CONTRIBUTING.md](CONTRIBUTING.md) và [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+---
+
+## Tác giả & Contributors
+
+* **Akbi47** ([@Akbi47](https://github.com/Akbi47)) — Author & Maintainer
+* **Audition MLD** ([@audition-mld](https://github.com/audition-mld)) — Contributor
+
+---
+
+## Giấy phép (License)
+
+Dự án được phân phối dưới giấy phép **MIT License**. Xem [LICENSE](LICENSE).
+
+---
+
+## Bảo mật (Security)
+
+Xem [SECURITY.md](SECURITY.md) để báo cáo lỗ hổng.
