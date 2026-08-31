@@ -13,12 +13,14 @@ grows.
 | Agile & Scrum 22 Interview Questions | Interview | 22 câu hỏi phỏng vấn Agile/Scrum cho Backend/Fullstack 1.5–3 năm: ý chính, trả lời mẫu, lỗi cần tránh | Khi ôn phỏng vấn, luyện trả lời theo tình huống dự án thật | [docs/interview/agile-scrum-22-interview-questions.md](./interview/agile-scrum-22-interview-questions.md) |
 | Feaon Production SEO, Search Console, Analytics & Ads Tech-Check Plan | SEO | Kế hoạch executable để Codex verify SEO production và chuẩn bị GSC/Analytics/Ads, phân tách CODEX-CAN-DO và HUMAN-ONLY | Khi audit SEO production, chuẩn bị Search Console/Analytics/Ads, cần baseline evidence | [docs/seo/feaon-production-seo-gsc-analytics-ads-tech-check-plan.md](./seo/feaon-production-seo-gsc-analytics-ads-tech-check-plan.md) |
 | Feaon SEO Configuration & Maintenance Guide | SEO | Tài liệu durable về SEO implementation và production ops của Feaon: route registry, canonical/hreflang, sitemap, robots, structured data | Khi sửa metadata/routes/sitemap, thêm trang localized, xử lý noindex/canonical | [docs/seo/feaon-seo-configuration-and-maintenance-guide.md](./seo/feaon-seo-configuration-and-maintenance-guide.md) |
+| GitHub Repository Health and Bootstrap Checklist | Guides | Checklist audit GitHub health (About, LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, .github templates) và playbook bootstrap repo mới đạt 100% | Khi tạo repo mới, audit repo cũ thiếu metadata, hoặc đồng bộ health cho batch repo | [docs/guides/github-repository-health-and-bootstrap-checklist.md](./guides/github-repository-health-and-bootstrap-checklist.md) |
 
 ## Quick Navigation
 
 - [AI Agents](./ai-agents/)
 - [Architecture](./architecture/)
 - [Deployment](./deployment/)
+- [Guides](./guides/)
 - [Interview](./interview/)
 - [SEO](./seo/)
 - [Templates](../templates/)
