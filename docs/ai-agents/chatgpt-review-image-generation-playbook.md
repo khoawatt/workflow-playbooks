@@ -1,157 +1,334 @@
-# ChatGPT Review Image Generation Playbook
+# Image Generation Lifecycle And Recovery Playbook
 
 ## Purpose
 
-Chuẩn hóa cách giao task gen/tạo ảnh (1 hoặc nhiều ảnh cùng lúc) cho `@chatgpt-review` (ChatGPT web qua Playwright bridge): đưa prompt + mô tả ảnh, chạy nền vì gen lâu, đợi hoàn tất rồi tải ảnh về và lưu vào nơi hợp lý để sử dụng. Tránh block session opencode, tránh mất ảnh, tránh lưu sai chỗ.
+Use this playbook for AI image generation, recovery, validation, review, and
+optional publication. It is the lifecycle source of truth for commands and
+provider adapters that invoke it.
 
-## When to use
+Generation and publication are separate concerns. Creating or recovering an
+image does not authorize uploading it, changing references, or mutating a
+hosted system.
 
-- User yêu cầu `gen ảnh`, `tạo ảnh`, `vẽ ảnh`, kèm mô tả/nội dung ảnh.
-- Cần gen batch nhiều ảnh trong một lần (pattern chuẩn của playbook này: **1 prompt → N ảnh**).
-- Task gen ảnh dự kiến lâu (vài phút), không muốn session chính bị treo đợi.
-- Sau khi có ảnh cần lưu vào repo để dùng tiếp (web assets, docs minh họa, slide, QA evidence).
+## Core Invariants
 
-## Preconditions
+- Submission is not completion.
+- A request or bridge timeout means completion was not observed through that
+  transport. It does not prove generation failure.
+- `SUBMIT_UNKNOWN` is not `SUBMIT_REJECTED`.
+- Once submission may have succeeded, reconcile that attempt before creating
+  another generation.
+- When a durable generation identifier exists, observe and recover by that
+  identifier before considering resubmission.
+- A rendered preview, thumbnail, or placeholder is not accepted as the
+  original asset.
+- Preserve the original binary where practical. Publish only an approved
+  canonical artifact.
+- Machine validation and visual review are distinct gates.
+- Publishing and production verification require explicit task authority.
 
-- Bridge đã login: `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status` phải in `"loggedIn": true`. Nếu `false` thì chạy `login` (manual, handles 2FA/CAPTCHA) hoặc `login --auto` khi `.env` đã có `CHATGPT_EMAIL/CHATGPT_PASSWORD` (`chmod 600`).
-- Bridge chạy **headful** mặc định (cần display để qua Cloudflare/Google checks). Trên server headless dùng `xvfb-run` hoặc virtual display.
-- Môi trường có `bash`, thư mục temp `/tmp/opencode` writable.
-- Hiểu giới hạn bridge: **single Chrome profile + serialize qua lock file** (`~/.config/opencode/chatgpt-bridge/.lock`). Hai lần `ask` song song sẽ xếp hàng, không chạy thực sự song song. Vì vậy batch N ảnh luôn gộp vào **một prompt**, không bắn N `ask` đồng thời.
-- Skill gốc `chatgpt-review` hiện định nghĩa cho review text (`RESULT_TEXT → VERDICT`); khi dùng để gen ảnh thì `ask` gửi prompt mô tả ảnh, không gửi theo envelope review.
+## Lifecycle
 
-## Workflow
+The normal lifecycle is:
 
-### 1. Chuẩn bị prompt file (1 prompt → N ảnh)
-
-Viết prompt vào file để `ask --file` đọc được, đánh số từng ảnh rõ ràng:
-
-```bash
-cat > /tmp/opencode/img-prompt.txt <<'EOF'
-Tạo 3 ảnh minh họa cho landing page khóa học:
-- Ảnh 1: hero banner 16:9, phong cách flat, robot thân thiện + chữ "Học AI từ số 0", nền sáng.
-- Ảnh 2: square 1:1, icon-style, biểu đồ tăng trưởng trên laptop.
-- Ảnh 3: portrait 3:4, ảnh chân dung giáo viên nữ đang giảng bài, ánh sáng studio.
-Trả về từng ảnh riêng biệt, giữ đúng thứ tự 1→3, không gộp chung vào một ảnh.
-EOF
-cat /tmp/opencode/img-prompt.txt
+```text
+PREPARED
+  -> SUBMITTING
+  -> SUBMITTED
+  -> OBSERVING
+  -> ASSET_DISCOVERED
+  -> ORIGINAL_VERIFIED
+  -> CANONICAL_READY
+  -> REVIEW_PENDING
+  -> APPROVED
+  -> [optional PUBLISHING]
+  -> DONE
 ```
 
-Quy tắc prompt:
+Exceptional states describe what is known, not merely whether a command exited
+non-zero:
 
-- Luôn ghi số lượng + tỉ lệ (`16:9`, `1:1`, `3:4`) + phong cách + nội dung chính mỗi ảnh.
-- Với 1 ảnh: mô tả 1 đoạn đầy đủ, vẫn dùng file để dễ log lại.
-- Không nhồi quá nhiều chi tiết mâu thuẫn vào một ảnh.
+| State | Meaning |
+|---|---|
+| `SUBMIT_REJECTED` | The provider definitely rejected the request before accepting generation work. |
+| `SUBMIT_UNKNOWN` | Submission may have succeeded, but acceptance or a durable identifier was not observed. |
+| `GENERATION_PENDING` | A durable identifier exists and completion has not yet been observed. |
+| `GENERATION_FAILED` | The provider positively reports failure or cancellation. |
+| `ASSET_PREVIEW_ONLY` | A rendered candidate exists, but no original has been recovered. |
+| `ASSET_FETCH_FAILED` | The original source is known, but retrieval failed. |
+| `ASSET_INVALID` | The retrieved binary failed required validation. |
+| `REVIEW_REJECTED` | The artifact is technically valid but failed visual or human review. |
+| `PUBLISH_CONFLICT` | The publication target changed before references could be updated safely. |
+| `PUBLISH_VERIFY_FAILED` | Upload or mutation occurred, but the remote artifact or production rendering is not verified. |
 
-### 2. Kiểm tra trạng thái bridge trước khi gen
+Do not collapse these states into a generic `failed -> retry prompt` rule.
 
-```bash
-~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status
-# phải có "loggedIn": true
+## Prepare The Request
 
-cd <repo-hien-tai> && ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review chats
-# xem key repo+branch hiện tại, tránh nhầm thread
+Record the task's actual requirements before submission:
+
+- number of images;
+- intended use and subject;
+- style and composition;
+- required aspect ratio or dimensions, if any;
+- format constraints, if any;
+- prohibited text, logos, watermarks, people, or other content;
+- destination for temporary, original, and canonical artifacts;
+- whether publication is authorized.
+
+For a family of images, give each requested asset a stable logical name or
+number. Provider-specific batching rules belong in the provider adapter.
+
+Hash the exact submitted prompt with SHA-256 for provenance. A changed prompt
+is a new semantic generation attempt, not a transport retry.
+
+## Submit And Capture A Durable Identifier
+
+Treat submission as its own event:
+
+1. Enter `SUBMITTING` before sending the prompt.
+2. If the provider definitely rejects it, record `SUBMIT_REJECTED`.
+3. If accepted, capture and persist the provider's durable identifier as early
+   as safely possible. Examples include conversation, generation, task, or
+   request IDs.
+4. Persist `SUBMITTED` before waiting for completion.
+5. If submission may have succeeded but no durable identifier is observable,
+   record `SUBMIT_UNKNOWN`, the last observed provider location/state, and
+   `safe_to_resubmit: false`.
+
+Do not wait for a text response before saving a durable identifier. Image-only
+generation may complete without producing the text signal expected by a
+request bridge.
+
+## Observe And Recover
+
+Observe generation independently from the request transport:
+
+1. Reopen or query the exact durable identifier.
+2. Continue bounded observation while the provider reports work in progress.
+3. Account for delayed hydration, lazy loading, pagination, or repeated
+   rendered nodes.
+4. Discover all plausible asset sources, then deduplicate them using stable
+   provider IDs, source identity, and finally binary hashes.
+5. Distinguish original assets from UI previews, thumbnails, placeholders, and
+   screenshots.
+6. If an original requires authentication, retrieve it through the existing
+   authenticated provider context rather than exporting cookies or assuming a
+   displayed URL is public.
+
+A process exit, log timeout, or missing text reply is not sufficient evidence
+for `GENERATION_FAILED`.
+
+## Validate The Original Binary
+
+Accept an original only after the checks relevant to the task pass:
+
+- successful authenticated retrieval when required;
+- expected HTTP/content type where available;
+- file signature and decoded format agree;
+- the binary decodes without error;
+- dimensions and aspect ratio satisfy task-supplied requirements;
+- byte size is plausible for the format and task;
+- SHA-256 is recorded;
+- duplicate detection is performed across the current batch and existing
+  accepted candidates.
+
+Do not use one global byte threshold, dimension, or format as proof that an
+asset is original. Provider and project requirements supply those constraints.
+
+If validation fails, preserve the evidence and inspect other original
+candidates before authorizing a new generation.
+
+## Original And Canonical Artifacts
+
+Keep these identities distinct:
+
+```text
+original provider binary
+  -> optional crop, resize, color adjustment, or conversion
+  -> canonical artifact
+  -> preview or rendered placement
+  -> optional publication
 ```
 
-- Nếu `loggedIn: false` → dừng, báo user login lại, không chạy gen.
-- Muốn thread mới sạch cho batch ảnh: thêm `--new` ở lệnh `ask`.
+Preserve the original during recovery and review where practical. Record every
+canonical transformation. If no transformation is needed, the original and
+canonical hashes may be identical. The task—not this playbook—determines the
+canonical format and dimensions.
 
-### 3. Chạy gen nền bằng `bash & + poll` (không block session)
+Never silently overwrite an accepted original or canonical artifact. Use
+stable paths and fail closed on unexpected existing files.
 
-Vì gen ảnh có thể mất vài phút, luôn chạy nền và poll log:
+## Audit And Provenance
 
-```bash
-BRIDGE=~/.config/opencode/chatgpt-bridge/bin/chatgpt-review
-LOG=/tmp/opencode/img-gen-$(date +%Y%m%d-%H%M%S).log
+Maintain one audit record per logical generation attempt. JSON is recommended,
+but the exact serialization is project-owned.
 
-nohup $BRIDGE ask --file /tmp/opencode/img-prompt.txt > "$LOG" 2>&1 &
-echo $! > /tmp/opencode/img-gen.pid
+Minimal reusable fields:
 
-echo "PID: $(cat /tmp/opencode/img-gen.pid)"
-echo "LOG: $LOG"
-tail -n 20 "$LOG"
+```json
+{
+  "prompt_sha256": "...",
+  "provider": "...",
+  "durable_generation_id": "... or null",
+  "submission_status": "submitted | rejected | unknown",
+  "recovery_status": "pending | recovered | failed | invalid",
+  "submitted_at": "ISO-8601 timestamp",
+  "recovered_at": "ISO-8601 timestamp or null",
+  "original": {
+    "path": "...",
+    "mime": "...",
+    "format": "...",
+    "width": 0,
+    "height": 0,
+    "bytes": 0,
+    "sha256": "..."
+  },
+  "canonical": {
+    "path": "...",
+    "width": 0,
+    "height": 0,
+    "sha256": "...",
+    "transformation": "none or structured metadata"
+  },
+  "review_status": "pending | approved | rejected",
+  "publish_status": "not_requested | pending | published | failed"
+}
 ```
 
-Poll đợi hoàn tất (chạy tiếp trong session khác hoặc sau khi làm việc khác):
+The original path, canonical object, review status, and publish status may be
+absent until those phases occur. Project-specific mapping, CMS, locale, issue,
+and storage fields are optional extensions, not core requirements.
 
-```bash
-PID=$(cat /tmp/opencode/img-gen.pid)
-LOG=$(ls -t /tmp/opencode/img-gen-*.log | head -n1)
+Write audit updates atomically when practical, especially immediately after
+submission and after original recovery.
 
-# kiểm tra còn chạy không
-if kill -0 "$PID" 2>/dev/null; then echo "RUNNING pid=$PID"; else echo "DONE pid=$PID"; fi
-tail -n 40 "$LOG"
+## Visual Review Gate
 
-# đợi tối đa ~15 phút, check mỗi 30s
-for i in $(seq 1 30); do
-  kill -0 "$PID" 2>/dev/null || break
-  sleep 30
-  echo "--- poll $i --- $(date -u +%H:%M:%S)"
-  tail -n 5 "$LOG"
-done
+Binary validation does not establish visual suitability. Review the canonical
+artifact against its intended placement. Depending on the task, use:
+
+- individual local previews;
+- contact sheets for a family;
+- desktop and mobile rendering;
+- `object-fit` or crop verification;
+- subject, geometry, face, hand, and material inspection;
+- unwanted text, logo, and watermark inspection;
+- consistency of lighting, palette, style, and composition across a family.
+
+Record `APPROVED` only after the required reviewer accepts the artifact. A
+visual rejection authorizes no automatic regeneration unless the task permits
+a new generation attempt.
+
+## Retry And Reconciliation Matrix
+
+| Observed condition | Required action |
+|---|---|
+| Submission definitely rejected before acceptance | Correct the request or transport; prompt submission may be retried. |
+| Submission accepted and durable ID persisted | Resume observation/recovery by ID; do not resubmit. |
+| Timeout after accepted or possibly accepted submission | Record `GENERATION_PENDING` when an ID exists, otherwise `SUBMIT_UNKNOWN`; reconcile first. |
+| Generation is still pending | Continue bounded observation; do not create another generation. |
+| Asset discovery is incomplete | Rehydrate, scroll, paginate, and deduplicate again. |
+| Original retrieval fails transiently | Retry retrieval for the same source and generation ID. |
+| Only preview candidates exist | Continue searching for an original source; do not accept the preview. |
+| Retrieved asset is invalid | Preserve evidence and inspect alternate originals before regeneration. |
+| Provider explicitly reports failure or cancellation | A new generation may be started when task authority permits. |
+| Visual review rejects a valid artifact | Treat regeneration as a deliberate new semantic attempt. |
+| Publication conflicts with newer remote state | Refetch and reconcile remote state; do not regenerate. |
+| Production verification fails | Investigate upload, reference, cache, and rendering layers; do not regenerate automatically. |
+
+Polling or re-fetching the same attempt is transport recovery. Sending the
+prompt again creates new semantic work and must be treated separately.
+
+## Optional Publishing Contract
+
+Run this phase only when publication is explicitly authorized:
+
+```text
+approved canonical artifact
+  -> upload
+  -> verify remote binary and metadata
+  -> refetch publication baseline
+  -> update references, preferably with optimistic concurrency
+  -> verify production rendering
+  -> DONE
 ```
 
-- Không xóa `.lock` thủ công trừ khi PID đã chết mà lock còn (stale lock bridge tự clear).
-- Không bắn batch thứ hai khi batch đầu còn `RUNNING` — bridge sẽ queue, dễ timeout nhầm.
+Upload success, reference-update success, and production rendering are three
+different facts. Record each separately. On ambiguous mutation responses,
+re-read state before retrying or rolling back.
 
-### 4. Lấy ảnh về và lưu vào nơi hợp lý (tùy ngữ cảnh)
+## ChatGPT Web Adapter
 
-ChatGPT web trả ảnh trong thread; agent lấy URL/file ảnh từ output `ask` trong `$LOG`, sau đó `curl` về local. Quy ước lưu theo ngữ cảnh:
+This section is provider-specific. It does not define universal image-provider
+behavior.
 
-| Ngữ cảnh repo | Nơi lưu đề xuất | Ví dụ |
+### Browser ownership
+
+- Use one persistent Chromium profile owner at a time.
+- Inspect the process that owns the profile and whether a CDP endpoint already
+  exists before launching or attaching.
+- When a browser already owns the profile, attach through Playwright
+  `connectOverCDP`; do not launch another browser with the same user-data-dir.
+- Do not delete Chromium `SingletonLock` files while their owner is alive.
+- Do not use broad `pkill` commands. Any stale-lock recovery must be scoped to
+  the exact verified profile and dead owner.
+- Preserve the bridge's single-profile serialization behavior.
+
+### Submission and observation
+
+- Treat the ChatGPT conversation ID as the durable generation identifier.
+- Persist it immediately after the conversation URL becomes observable, before
+  waiting for assistant text.
+- A text-oriented bridge timeout after submission is `GENERATION_PENDING` when
+  the conversation ID is known, otherwise `SUBMIT_UNKNOWN`.
+- Reopen the exact conversation for recovery and observe the conversation DOM.
+- Current implementations may inspect image nodes within conversation turns or
+  use provider-specific image attributes. Selectors are replaceable adapter
+  details and must be verified against the live DOM.
+- Account for hydration and lazy loading. Scroll the actual conversation
+  containers and require the expected set of unique candidates before
+  recovery.
+
+### Original recovery
+
+- Collect candidate `currentSrc`, `src`, `srcset`, picture sources, parent
+  links, and stable provider file IDs when present.
+- Deduplicate repeated rendered nodes before downloading.
+- Prefer the provider's original asset source over screenshots or rendered
+  thumbnails.
+- Retrieve authenticated originals through the existing Playwright browser
+  context request API. Do not export cookies or assume a signed/displayed URL
+  can be fetched anonymously.
+- Validate the returned binary using the generic validation phase and
+  task-supplied requirements.
+
+Headful mode may be required when provider anti-automation checks block
+headless access. This is an adapter fallback, not a core invariant.
+
+## Failure-Oriented Troubleshooting
+
+| Symptom | Classification | Action |
 |---|---|---|
-| Web app (Next.js/React) | `assets/generated/<yyyy-mm-dd>/` hoặc `public/images/generated/` | `assets/generated/2026-09-12/hero-01.png` |
-| Docs/playbook repo | `docs/assets/<topic>/` | `docs/assets/landing/hero-01.png` |
-| Task tạm / chưa chốt dùng | `/tmp/opencode/img-out/` rồi `move` khi chốt | `/tmp/opencode/img-out/batch-01/` |
-| QA evidence / bug visual | cùng folder evidence của task | `docs/qa/<task-id>/` |
+| Login/session unavailable before submission | `SUBMIT_REJECTED` | Restore authentication, then submit once. |
+| Send was attempted and the bridge timed out waiting for text | `GENERATION_PENDING` with ID, otherwise `SUBMIT_UNKNOWN` | Inspect saved bridge state and recover/reconcile; do not blindly resend. |
+| Another live process owns the provider profile | Observation blocked, not generation failure | Wait for or attach to the verified owner; do not delete its locks. |
+| Conversation opens but images are initially missing | `GENERATION_PENDING` or incomplete discovery | Wait for hydration and progressively inspect the real scroll containers. |
+| Many DOM nodes reference fewer assets | Duplicate rendered candidates | Deduplicate by stable source ID and binary hash. |
+| Download returns HTML, login content, or a thumbnail | `ASSET_PREVIEW_ONLY` or `ASSET_FETCH_FAILED` | Use authenticated original recovery from the same provider context. |
+| Binary type, decode, dimensions, or hash checks fail | `ASSET_INVALID` | Preserve evidence and inspect alternate originals. |
+| Canonical image crops badly in its component | `REVIEW_REJECTED` | Adjust the authorized canonical transformation or start a deliberate new generation. |
+| Upload succeeds but the page still renders the old asset | `PUBLISH_VERIFY_FAILED` | Verify references, cache/revalidation, and the exact production route. |
 
-```bash
-mkdir -p /tmp/opencode/img-out assets/generated/$(date +%F)
-ls -lh /tmp/opencode/img-out/ assets/generated/$(date +%F)/
+## Handoff
 
-# mẫu tải khi LOG chứa URL ảnh (thay URL thật từ output ask)
-curl -L "<IMAGE_URL_1>" -o "assets/generated/$(date +%F)/img-01.png"
-curl -L "<IMAGE_URL_2>" -o "assets/generated/$(date +%F)/img-02.png"
+Report at least:
 
-ls -lh assets/generated/$(date +%F)/
-```
-
-- Tên file `lowercase-kebab-case.png/jpg`, không space/underscore, gắn số thứ tự khớp prompt (`hero-01.png`, `hero-02.png`).
-- Không commit `profile/`, `chats.json`, `projects.json`, `.lock`, `.env` của bridge.
-
-### 5. Verify ảnh bằng vision trước khi bàn giao
-
-```bash
-ls -lh assets/generated/$(date +%F)/img-*.png
-```
-
-- Dùng `read` lên từng file ảnh để model vision xác nhận đúng mô tả, đúng tỉ lệ, không lỗi chữ/mặt/tay.
-- Với batch: đối chiếu ảnh 1..N với prompt đánh số ở bước 1; ảnh nào sai thì gen lại riêng bằng prompt lẻ, không gen lại cả batch.
-
-## Validation
-
-- [ ] `status` in `"loggedIn": true` trước khi gen.
-- [ ] Có file `/tmp/opencode/img-prompt.txt` ghi rõ số lượng + mô tả từng ảnh.
-- [ ] Lệnh gen chạy nền qua `&`, có `img-gen.pid` + `img-gen-*.log`, session chính không bị block.
-- [ ] Poll xác nhận PID `DONE`, log chứa đủ N ảnh/URL theo thứ tự.
-- [ ] `ls -lh` nơi lưu đích: mỗi file > 50KB, tên `lowercase-kebab-case`, đúng N file.
-- [ ] `read` từng ảnh thành công, nội dung khớp mô tả prompt.
-- [ ] `docs/index.md` không cần đổi cho task gen ảnh lẻ; chỉ đổi khi batch này là playbook/asset durable của repo.
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `status` in `"loggedIn": false` | Session hết hạn / chưa login | Chạy `chatgpt-review login` (manual, xử 2FA/CAPTCHA) hoặc `login --auto` khi `.env` đã cấu hình; check lại `status` |
-| `ask` treo lâu, log không ra | `.lock` đang giữ bởi run khác / Cloudflare chặn headless | `tail` log + `chats`; đợi run trước xong; trên headless dùng `xvfb-run`; không xóa lock khi PID còn sống |
-| Gen batch thiếu ảnh (3 yêu cầu, về 2) | Prompt gộp ảnh, model gộp/sót | Tách mô tả đánh số `Ảnh 1/2/3`, yêu cầu "trả từng ảnh riêng, đúng thứ tự"; gen bù ảnh thiếu bằng prompt lẻ + `--new` nếu thread cũ stale |
-| Ảnh sai tỉ lệ / sai style | Prompt thiếu `16:9/1:1`, thiếu style | Bổ sung tỉ lệ + style + negative ("không gộp chung", "không thêm chữ thừa") rồi gen lại ảnh đó |
-| `curl` về file < 50KB chứa HTML login | URL hết hạn / cần auth | Mở lại thread `chats`, lấy URL mới từ output `ask`; không commit URL signed vào git |
-| Không biết lưu ở đâu | Repo chưa có quy ước assets | Theo bảng ngữ cảnh ở bước 4; task tạm giữ ở `/tmp/opencode/img-out/`, chốt mới `move` vào `assets/generated/<date>/` |
-| Muốn N prompt song song cho nhanh | Bridge single-profile serialize | Không làm vậy; luôn **1 prompt → N ảnh** trong một `ask`, xếp hàng tuần tự nếu có nhiều batch |
-
-## References
-
-- Skill gốc: `~/.config/opencode/skills/chatgpt-review/SKILL.md` — subcommands `ask|status|chats|reset|project`, approval `get|set|clear`, conversation reuse per repo+branch, `bridge-config.json` (`max_chars`/`max_turns`/`max_age_hours`).
-- Mẫu format playbook: `docs/guides/google-docs-image-reading-guide.md` (workflow + lệnh cụ thể + bảng troubleshooting + case thực tế).
-- Quy ước đặt tên: `meta/naming-conventions.md` (`lowercase-kebab-case.md`, acronym lowercased); template: `templates/playbook-template.md`.
-- Case-образец: batch hero 3 ảnh landing (16:9/1:1/3:4) chạy nền `nohup ask --file … &` + poll `kill -0` + lưu `assets/generated/<date>/img-0N.png` + verify bằng `read` vision.
+- lifecycle state;
+- durable generation identifier, or why none is available;
+- audit record path;
+- original and canonical artifact paths;
+- validation result;
+- review/approval status;
+- publication and production-verification status when applicable;
+- unresolved ambiguity and the next safe action.
