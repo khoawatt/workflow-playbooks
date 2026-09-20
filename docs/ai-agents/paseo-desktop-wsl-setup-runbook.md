@@ -1,7 +1,11 @@
 # Paseo Desktop (Windows) ↔ WSL2 Setup Runbook
 
 > Tài liệu cho AI agent triển khai. Đọc hết trước khi chạy, báo **PASS / FAIL / BLOCKED** sau mỗi step.
-> Tested: 2026-09-20 — Ubuntu 26.04 / kernel `6.18.33.1-microsoft-standard-WSL2` / Node `v26.3.0` / npm `11.16.0` / claude `2.1.186` / codex `0.155.1` / opencode `v2.0.10` / `@getpaseo/cli@0.8.0` / daemon `0.8.0`.
+> Tested successfully: 2026-09-20 — Ubuntu 26.04 / kernel `6.18.33.1-microsoft-standard-WSL2` / Node `v26.3.0` / npm `11.16.0` / claude `2.1.186` / codex `0.155.1` / opencode `v2.0.10` / `@getpaseo/cli@0.8.0` / daemon `0.8.0`.
+>
+> **Paseo Desktop Windows version was not captured in the original successful run.** Before future migration/upgrade, record it from **Settings → About**.
+>
+> **Version policy:** `0.8.0` is the known-good snapshot for this machine. A fresh rebuild should pin `@getpaseo/cli@0.8.0` first. If intentionally using a newer Paseo version, re-check `paseo daemon --help`, Remote SSH behavior, provider diagnostics, and the acceptance tests before changing the saved setup.
 
 ## 1. Kiến trúc
 
@@ -31,7 +35,9 @@ Nguyên tắc: daemon + agents + code **đều ở WSL**. Không Docker, không 
 
 ## 3. Step 0 — Gỡ nút thắt `sudo` (chạy 1 lần duy nhất)
 
-Mọi lệnh sau đều cần `sudo`. Cấp `NOPASSWD` để agent và các step sau chạy không cần interactive (chấp nhận được trên WSL dev cá nhân, không làm trên server shared):
+Mọi lệnh sau đều cần `sudo`. Cấp `NOPASSWD` **tạm thời trong lúc setup** để agent và các step sau chạy không cần interactive (chấp nhận được trên WSL dev cá nhân, không làm trên server shared).
+
+**Bắt buộc:** sau khi SSH key-auth + services đã PASS, xóa quyền `NOPASSWD:ALL` ở Step 3.5. Không để quyền này tồn tại lâu dài.
 
 ```bash
 sudo tee /etc/sudoers.d/99-$(whoami)-nopasswd >/dev/null <<EOF
@@ -49,8 +55,14 @@ PASS: in ra `SUDO_OK`. Từ đây dùng `sudo -n` ở mọi nơi.
 uname -r | grep -q microsoft-standard-WSL2 && echo WSL2_OK
 whoami; node --version; npm --version
 for c in claude codex opencode; do command -v $c && $c --version 2>/dev/null; done
-command -v paseo >/dev/null || npm install -g @getpaseo/cli   # NVM prefix user, KHÔNG sudo npm
+PASEO_KNOWN_GOOD="0.8.0"
+if ! command -v paseo >/dev/null; then
+  npm install -g "@getpaseo/cli@${PASEO_KNOWN_GOOD}"   # NVM prefix user, KHÔNG sudo npm
+fi
 paseo --version
+echo "Known-good runbook version: ${PASEO_KNOWN_GOOD}"
+# Nếu installed version != 0.8.0: KHÔNG tự downgrade/upgrade. Ghi nhận version,
+# chạy `paseo daemon --help`, rồi dùng compatibility guard ở Step 2.
 paseo daemon status || paseo daemon start
 curl -fsS http://127.0.0.1:6767/api/health && echo && ss -lntp | grep 6767
 ```
@@ -60,7 +72,9 @@ Không reinstall Node/agent đang chạy. NVM thì không `sudo npm`.
 
 ## 5. Step 2 — SSH server + autostart (1 block duy nhất)
 
-Block này làm 4 việc: cài sshd, config port 2222, **vô hiệu hóa `ssh.socket`** (gotcha lớn nhất — socket activation giữ port 22 khiến config 2222 bị lờ), và chuyển daemon sang systemd để tự sống lại sau reboot.
+Block này làm 4 việc: cài sshd, config port 2222, **vô hiệu hóa `ssh.socket`** (gotcha lớn nhất — socket activation giữ port 22 khiến config 2222 bị lờ), và chuyển daemon sang systemd user service.
+
+**Compatibility guard:** setup đã chạy thành công với Paseo `0.8.0` và `daemon start --foreground`. Paseo mới hơn có thể dùng `paseo daemon run` cho foreground deployments. Block dưới tự phát hiện command mà version hiện tại hỗ trợ, thay vì hard-code một lifecycle command đã cũ.
 
 ```bash
 # --- 5.1 openssh-server (kèm tự vá dpkg nửa chừng) ---
@@ -77,28 +91,46 @@ PermitRootLogin no
 EOF
 sudo -n sshd -t && echo SSHD_CONF_OK
 
-# --- 5.3 TẮT socket activation :22, BẬT service :2222 + autostart + backup cron ---
+# --- 5.3 TẮT socket activation :22, BẬT service :2222 + autostart ---
 sudo -n systemctl disable --now ssh.socket >/dev/null 2>&1 || true
 sudo -n systemctl enable ssh
-sudo -n service ssh restart
+sudo -n systemctl restart ssh
 ss -lntp | grep 2222
-(sudo -n crontab -l 2>/dev/null | grep -v 'paseo-ssh-autostart'; \
-  echo "@reboot /usr/sbin/service ssh start  # paseo-ssh-autostart") | sudo -n crontab -
 
-# --- 5.4 Chuyển Paseo daemon sang systemd user service (tự restart, sống sau reboot) ---
+# Không thêm cron @reboot khi systemd đã hoạt động.
+# `systemctl enable ssh` là source of truth duy nhất cho sshd autostart.
+
+# --- 5.4 Chuyển Paseo daemon sang systemd user service ---
 PASEO_BIN="$(command -v paseo)"
+NODE_BIN_DIR="$(dirname "$(command -v node)")"
+
+# Paseo 0.8.0 known-good: `daemon start --foreground`
+# Paseo mới hơn: foreground deployment dùng `daemon run`.
+if paseo daemon run --help >/dev/null 2>&1; then
+  PASEO_FG_CMD="${PASEO_BIN} daemon run"
+elif paseo daemon start --help 2>&1 | grep -q -- '--foreground'; then
+  PASEO_FG_CMD="${PASEO_BIN} daemon start --foreground"
+else
+  echo "BLOCKED: không tìm thấy foreground daemon command phù hợp."
+  paseo daemon --help
+  exit 1
+fi
+echo "Using foreground command: ${PASEO_FG_CMD}"
+
 mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/paseo-daemon.service <<EOF
 [Unit]
 Description=Paseo Daemon (autostart)
 After=network-online.target
 Wants=network-online.target
+
 [Service]
-ExecStart=${PASEO_BIN} daemon start --foreground
+ExecStart=${PASEO_FG_CMD}
 Restart=always
 RestartSec=5
 Environment=HOME=${HOME}
-Environment=PATH=${HOME}/.nvm/versions/node/$(node --version)/bin:/usr/local/bin:/usr/bin:/bin:${HOME}/.local/bin
+Environment=PATH=${NODE_BIN_DIR}:${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
+
 [Install]
 WantedBy=default.target
 EOF
@@ -107,11 +139,16 @@ paseo daemon stop >/dev/null 2>&1 || true   # dọn daemon chạy tay + stale pi
 systemctl --user enable --now paseo-daemon.service
 sleep 3
 systemctl --user is-active paseo-daemon.service
-curl -fsS http://127.0.0.1:6767/api/health && echo && paseo daemon status | head -8
+curl -fsS http://127.0.0.1:6767/api/health && echo
+paseo daemon status | head -12
 ```
 
 PASS: `SSHD_CONF_OK`, `ss -lntp` thấy `:2222`, service `active`, daemon health `ok`.
-Lưu ý: `ExecStart` pin Node version hiện tại — nếu đổi Node (nvm) thì chạy lại 5.4.
+
+Lưu ý:
+- Unit pin **Node bin directory hiện tại**. Nếu đổi Node/NVM version, chạy lại 5.4.
+- Nếu upgrade Paseo, chạy lại 5.4 để foreground command được detect lại (`daemon run` vs legacy `start --foreground`).
+- Không cần cron backup khi systemd đang là init của WSL.
 
 ## 6. Step 3 — SSH key (gen phía Windows, gọi từ WSL, không cần mở PowerShell tay)
 
@@ -139,6 +176,48 @@ rm -f ~/.cache/paseo-keytest.ps1
 
 PASS: thấy `KEY_AUTHORIZED` và `SSH_KEY_OK` (không hỏi password). Không ghi đè key Windows đã có, không copy private key vào WSL.
 
+## 6.5. Step 3.5 — Hardening sau khi key-auth PASS
+
+Chỉ chạy step này **sau khi Step 3 đã in `SSH_KEY_OK`**.
+
+### 3.5.1 Tắt SSH password authentication
+
+```bash
+sudo -n tee /etc/ssh/sshd_config.d/99-paseo-wsl.conf >/dev/null <<'EOF'
+Port 2222
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitRootLogin no
+EOF
+sudo -n sshd -t
+sudo -n systemctl restart ssh
+```
+
+Test lại từ Windows bằng BatchMode:
+
+```bash
+cat > ~/.cache/paseo-keytest-after-hardening.ps1 <<PS1
+ssh -p 2222 -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new $USER@127.0.0.1 "echo SSH_KEY_HARDENED_OK"
+PS1
+"$PWSH" -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w ~/.cache/paseo-keytest-after-hardening.ps1)"
+rm -f ~/.cache/paseo-keytest-after-hardening.ps1
+```
+
+PASS: `SSH_KEY_HARDENED_OK`.
+
+### 3.5.2 Xóa quyền `NOPASSWD:ALL` tạm thời
+
+Sau khi services + SSH key-auth đã PASS:
+
+```bash
+sudo -n rm -f /etc/sudoers.d/99-$(whoami)-nopasswd
+sudo visudo -c
+```
+
+Từ đây `sudo` lại yêu cầu password bình thường. Đây là trạng thái cuối mong muốn.
+
+---
+
 ## 7. Step 4 — Paseo Desktop (tay, 1 phút, trên Windows)
 
 `Settings → Add host → Remote SSH`, destination:
@@ -155,10 +234,21 @@ Bắt buộc đúng 3 điểm (rút từ lỗi thực tế):
 ## 8. Step 5 — Verify chốt (1 block)
 
 ```bash
-paseo --version; paseo daemon status | head -12
+paseo --version
+paseo daemon status | head -12
 curl -fsS http://127.0.0.1:6767/api/health; echo
 ss -lntp | grep -E '2222|6767'
 systemctl --user is-active paseo-daemon.service
+
+# Quan trọng: kiểm tra environment mà DAEMON thực sự nhìn thấy,
+# không chỉ environment của interactive shell.
+for p in claude codex opencode; do
+  if command -v "$p" >/dev/null 2>&1; then
+    echo
+    echo "=== Paseo provider diagnostic: $p ==="
+    paseo provider diagnostic "$p"
+  fi
+done
 ```
 
 Rồi trong Paseo terminal (host WSL): `uname -a` → Linux WSL2; `pwd`, `git rev-parse --show-toplevel`, `command -v node/claude/codex` → toàn path `/home/...`.
@@ -182,20 +272,26 @@ Debug sâu: `ssh -v -p 2222 user@127.0.0.1` (Windows) → phân biệt network v
 
 ## 10. Vận hành sau setup
 
-- WSL reboot/`wsl --shutdown`/Windows restart: mở WSL 1 lần → sshd + daemon tự lên. Không chạy lại setup.
-- Đổi Node version: chạy lại mục 5.4 để unit file trỏ đúng binary.
-- Daemon relay mặc định bật (`wss://relay.paseo.sh:443`) — SSH là đường chính cùng máy, relay chỉ là fallback.
+- WSL reboot/`wsl --shutdown`/Windows restart: mở WSL 1 lần → systemd khởi động sshd; user manager khởi động Paseo user service. Không chạy lại setup.
+- Đổi Node/NVM version: chạy lại mục 5.4 để unit file trỏ đúng Node bin directory.
+- Upgrade Paseo: ghi lại Desktop + CLI + daemon versions, đọc release notes, chạy `paseo daemon --help`, chạy lại mục 5.4, provider diagnostics và toàn bộ Acceptance trước khi coi upgrade là ổn.
+- Known-good snapshot của runbook này là CLI/daemon `0.8.0`; không dùng `npm install -g @getpaseo/cli` không pin trong một fresh rebuild nếu mục tiêu là reproduce đúng snapshot.
+- Daemon relay có thể tồn tại như fallback; SSH là đường chính cùng máy.
 - Không expose `6767` ra `0.0.0.0`. Quyền chuẩn: `chmod 700 ~/.ssh`, `chmod 600 ~/.ssh/authorized_keys`.
+- Trạng thái security cuối: SSH `PasswordAuthentication no`; không còn `/etc/sudoers.d/99-<user>-nopasswd`.
 
 ## 11. Acceptance (PASS toàn bộ mới xong)
 
 ```text
-[ ] SUDO_OK (sudo -n không hỏi password)
+[ ] Setup bootstrap từng có SUDO_OK, nhưng FINAL state đã xóa NOPASSWD:ALL
 [ ] node/npm/agents chạy, path Linux
+[ ] Paseo CLI/daemon version đã được ghi nhận; Desktop version đã được ghi từ Settings → About
 [ ] paseo daemon status = running, listen 127.0.0.1:6767, health ok
 [ ] ss thấy :2222 (sshd) và :6767 (daemon)
 [ ] paseo-daemon.service active + enabled
-[ ] ssh Windows → WSL không cần password (SSH_KEY_OK)
+[ ] `paseo provider diagnostic` PASS cho mọi provider đang dùng
+[ ] ssh Windows → WSL không cần password (SSH_KEY_OK / SSH_KEY_HARDENED_OK)
+[ ] SSH final config: PasswordAuthentication no, PermitRootLogin no
 [ ] Paseo Desktop add ssh://user@127.0.0.1:2222 → connected
 [ ] terminal Paseo: uname WSL2, path /home/..., agent đọc repo Linux OK
 ```
@@ -204,13 +300,15 @@ Debug sâu: `ssh -v -p 2222 user@127.0.0.1` (Windows) → phân biệt network v
 
 ```markdown
 ## Paseo WSL Setup Result
-- Env: <distro / user / node / npm / paseo / ssh-port>
-- Providers: Claude <PASS/FAIL path> / Codex <…> / OpenCode <…>
-- Daemon: <running?> <listen> <PID> <relay?>
-- SSH: Windows→WSL <PASS/FAIL> / key-auth <PASS/FAIL>
+- Env: <distro / user / node / npm / ssh-port>
+- Versions: Desktop <...> / CLI <...> / daemon <...>
+- Providers: Claude <PASS/FAIL diagnostic + path> / Codex <…> / OpenCode <…>
+- Daemon: <running?> <listen> <PID> <foreground command selected>
+- SSH: Windows→WSL <PASS/FAIL> / key-auth <PASS/FAIL> / password-auth disabled <y/n>
+- Security cleanup: NOPASSWD removed <y/n>
 - Paseo Desktop: host added <y/n> / connected <y/n>
 - Runtime: <uname / pwd / git-root / node-path / agent-path>
-- Changes: <packages / configs / services+cron>
+- Changes: <packages / configs / systemd services>
 - Remaining: <…>
 - Final: PASS / PARTIAL / BLOCKED
 ```
@@ -218,8 +316,15 @@ Debug sâu: `ssh -v -p 2222 user@127.0.0.1` (Windows) → phân biệt network v
 ## 13. References
 
 - Repo: https://github.com/getpaseo/paseo
-- CLI: https://github.com/getpaseo/paseo/blob/main/public-docs/index.md · connectivity: `…/public-docs/connectivity.md` · config: `…/public-docs/configuration.md` · cli/diagnostic: `…/public-docs/cli.md` · ssh transport: `…/docs/development.md`
+- CLI: https://github.com/getpaseo/paseo/blob/main/public-docs/index.md
+- Connectivity / Remote SSH: https://github.com/getpaseo/paseo/blob/main/public-docs/connectivity.md
+- Configuration: https://github.com/getpaseo/paseo/blob/main/public-docs/configuration.md
+- CLI / provider diagnostics / daemon lifecycle: https://github.com/getpaseo/paseo/blob/main/public-docs/cli.md
+- SSH transport internals: https://github.com/getpaseo/paseo/blob/main/docs/development.md
+- Releases (check before upgrading): https://github.com/getpaseo/paseo/releases
 - OpenCode↔Paseo 401 incompatibility: https://github.com/getpaseo/paseo/issues/1159
+
+> Docs trên `main` có thể đi trước snapshot `0.8.0`. Khi rebuild đúng máy/snapshot cũ, ưu tiên behavior đã test + `--help` của binary đang cài; khi upgrade, ưu tiên docs/release notes của version mới và chạy lại acceptance.
 
 ## 14. OpenCode: fix lỗi model + terminal profile `terminal exited` (2026-09-20, append-only)
 
