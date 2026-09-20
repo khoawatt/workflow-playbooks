@@ -7,6 +7,30 @@
 >
 > **Version policy:** `0.8.0` is the known-good snapshot for this machine. A fresh rebuild should pin `@getpaseo/cli@0.8.0` first. If intentionally using a newer Paseo version, re-check `paseo daemon --help`, Remote SSH behavior, provider diagnostics, and the acceptance tests before changing the saved setup.
 
+> **Document status:** MASTER RUNBOOK — dùng cho rebuild / migrate / recovery / upgrade / rollback.  
+> Nếu một bước trong file mâu thuẫn với behavior của binary hiện đang cài, **dừng lại và xác minh bằng `--help` + release notes của đúng version** trước khi thay đổi hệ thống.
+
+## 0. Version matrix đã biết
+
+| Component | Known-good / current state | Ghi chú |
+|---|---:|---|
+| Paseo Desktop (Windows) | **CHƯA CAPTURE** | Bắt buộc ghi lại từ `Settings → About` trước lần upgrade/migrate tiếp theo |
+| Paseo CLI (WSL) | `0.8.0` | known-good snapshot |
+| Paseo daemon (WSL) | `0.8.0` | known-good snapshot |
+| Node | `v26.3.0` | đang dùng trong WSL |
+| npm | `11.16.0` | đang dùng trong WSL |
+| Claude Code | `2.1.186` | provider bình thường |
+| Codex | `0.155.1` | provider bình thường |
+| OpenCode interactive / terminal profile | `v2.0.10` | binary chính của user: `~/.opencode/bin/opencode` |
+| OpenCode cho Paseo provider | `1.18.31` | workaround riêng cho Paseo 0.8.0 do issue auth/401 |
+
+### Quy tắc version
+
+- **Rebuild đúng snapshot hiện tại:** pin Paseo CLI/daemon `0.8.0`.
+- **Upgrade có chủ đích:** không giữ workaround cũ bằng quán tính; xem §13 để upgrade + test + rollback.
+- **Không assume Desktop/CLI/daemon phải luôn cùng version**, nhưng mọi mismatch phải được ghi lại và test acceptance.
+
+
 ## 1. Kiến trúc
 
 ```text
@@ -210,8 +234,9 @@ PASS: `SSH_KEY_HARDENED_OK`.
 Sau khi services + SSH key-auth đã PASS:
 
 ```bash
-sudo -n rm -f /etc/sudoers.d/99-$(whoami)-nopasswd
-sudo visudo -c
+# Gộp remove + validate vào cùng một privileged shell để tránh tự khóa automation
+# ngay sau khi xóa NOPASSWD.
+sudo -n sh -c 'rm -f /etc/sudoers.d/99-'"$(whoami)"'-nopasswd && visudo -c'
 ```
 
 Từ đây `sudo` lại yêu cầu password bình thường. Đây là trạng thái cuối mong muốn.
@@ -254,21 +279,70 @@ done
 Rồi trong Paseo terminal (host WSL): `uname -a` → Linux WSL2; `pwd`, `git rev-parse --show-toplevel`, `command -v node/claude/codex` → toàn path `/home/...`.
 Test agent read-only: *"Inspect this repo: cwd, branch, runtime. Do not modify anything."*
 
+## 8.5. Backup / restore trước mọi thay đổi config quan trọng
+
+Trước khi sửa `~/.paseo/config.json`, tạo backup timestamped:
+
+```bash
+mkdir -p ~/.paseo/backups
+cp ~/.paseo/config.json \
+  ~/.paseo/backups/config.json.$(date +%Y%m%d-%H%M%S).bak
+ls -lt ~/.paseo/backups | head
+```
+
+Nếu file chưa tồn tại:
+
+```bash
+test -f ~/.paseo/config.json || echo "No config.json yet"
+```
+
+### Restore config
+
+Chọn đúng backup cần restore:
+
+```bash
+ls -lt ~/.paseo/backups
+```
+
+Sau đó:
+
+```bash
+cp ~/.paseo/backups/config.json.<TIMESTAMP>.bak ~/.paseo/config.json
+paseo reload
+```
+
+Nếu change liên quan provider executable / daemon lifecycle và reload chưa đủ:
+
+```bash
+systemctl --user restart paseo-daemon.service
+```
+
+### Rule
+
+- Backup trước khi sửa provider override.
+- Backup trước khi sửa terminal profiles.
+- Backup trước khi migrate config sang Paseo version mới.
+- Không xóa backup cho tới khi acceptance pass hoàn toàn.
+
+---
+
 ## 9. Troubleshooting (theo thứ tự, đừng đoán mò)
 
 | Triệu chứng | Root cause đã gặp | Fix |
 |---|---|---|
-| `apt` báo `dpkg was interrupted` / `vim depends on vim-runtime` | dpkg dở dang | `sudo -n dpkg --configure -a && sudo -n apt install -f -y`, cài lại |
-| `:2222` không listen, sshd vẫn nghe `:22` | `ssh.socket` còn active, giành quyền | `sudo -n systemctl disable --now ssh.socket && sudo -n service ssh restart` |
+| `apt` báo `dpkg was interrupted` / `vim depends on vim-runtime` | dpkg dở dang | `sudo dpkg --configure -a && sudo apt install -f -y`, cài lại |
+| `:2222` không listen, sshd vẫn nghe `:22` | `ssh.socket` còn active, giành quyền | `sudo systemctl disable --now ssh.socket && sudo systemctl restart ssh` |
 | SSH tay hỏi password / Paseo báo auth fail | thiếu key | chạy lại Step 3 |
 | SSH tay OK nhưng Paseo timeout | host `localhost` dính `::1` / thiếu port | đổi URI sang `ssh://user@127.0.0.1:2222` |
-| Đóng terminal xong Paseo mất kết nối | WSL đã shutdown/reboot | mở WSL 1 lần (services tự lên: `enable ssh` + cron `@reboot` + user service), verify Step 5 |
+| Đóng terminal xong Paseo mất kết nối | WSL đã shutdown/reboot | mở WSL 1 lần (systemd khởi động `ssh.service` + user service Paseo), verify Step 5 |
 | Daemon `not_running (stale PID)` | pid cũ sau crash/reboot | `paseo daemon stop` dọn pid rồi `systemctl --user start paseo-daemon` |
 | Daemon không thấy agent dù shell thấy | PATH (NVM) | so `echo $PATH` với `paseo provider diagnostic <name>`; không symlink bừa vào `/usr/local/bin` |
-| Phần model OpenCode trong Paseo báo `Error` | daemon `PATH` thiếu binary + OpenCode 2.x trả 401 cho Paseo 0.8.0 | xem §14.1 (binary 1.18.31 riêng + provider override) |
-| Tab profile OpenCode hiện `Terminal exited`, scrollback rỗng | prompt truyền positional bị hiểu thành đường dẫn project | xem §14.2 (revert profile về `opencode` + `--prompt={{{prompt}}}`, hard-refresh UI) |
+| Phần model OpenCode trong Paseo báo `Error` | daemon `PATH` thiếu binary + OpenCode 2.x trả 401 cho Paseo 0.8.0 | xem §17.1 (binary 1.18.31 riêng + provider override) |
+| Tab profile OpenCode hiện `Terminal exited`, scrollback rỗng | prompt truyền positional bị hiểu thành đường dẫn project | xem §17.2 (revert profile về `opencode` + `--prompt={{{prompt}}}`, hard-refresh UI) |
 
 Debug sâu: `ssh -v -p 2222 user@127.0.0.1` (Windows) → phân biệt network vs auth; `sudo journalctl -u ssh --no-pager -n 20`; `tail -n 200 ~/.paseo/daemon.log`.
+
+> Sau Step 3.5, troubleshooting command có `sudo` sẽ hỏi password bình thường. Không recreate `NOPASSWD:ALL` chỉ để debug.
 
 ## 10. Vận hành sau setup
 
@@ -309,11 +383,186 @@ Debug sâu: `ssh -v -p 2222 user@127.0.0.1` (Windows) → phân biệt network v
 - Paseo Desktop: host added <y/n> / connected <y/n>
 - Runtime: <uname / pwd / git-root / node-path / agent-path>
 - Changes: <packages / configs / systemd services>
+- Backup: <latest config backup path>
+- OpenCode workaround: ENABLED / DECOMMISSIONED / NOT NEEDED
 - Remaining: <…>
 - Final: PASS / PARTIAL / BLOCKED
 ```
 
-## 13. References
+
+## 13. Upgrade / migrate / rebuild procedure
+
+### 13.1. Trước khi upgrade Paseo
+
+Capture:
+
+```bash
+paseo --version
+paseo daemon status
+node --version
+npm --version
+for p in claude codex opencode; do
+  command -v "$p" || true
+  "$p" --version 2>/dev/null || true
+done
+```
+
+Trong Paseo Desktop ghi lại:
+
+```text
+Desktop version
+Remote SSH URI
+WSL host connection status
+```
+
+Backup:
+
+```bash
+mkdir -p ~/.paseo/backups
+cp ~/.paseo/config.json \
+  ~/.paseo/backups/config.json.$(date +%Y%m%d-%H%M%S).pre-upgrade.bak
+cp ~/.config/systemd/user/paseo-daemon.service \
+  ~/.paseo/backups/paseo-daemon.service.$(date +%Y%m%d-%H%M%S).pre-upgrade.bak
+```
+
+### 13.2. Sau khi upgrade
+
+Không assume daemon command cũ còn hợp lệ.
+
+```bash
+paseo daemon --help
+paseo daemon run --help 2>/dev/null || true
+paseo daemon start --help 2>/dev/null || true
+```
+
+Re-run mục 5.4 để regenerate systemd command nếu lifecycle đã đổi.
+
+Sau đó bắt buộc:
+
+```bash
+paseo daemon status
+curl -fsS http://127.0.0.1:6767/api/health
+for p in claude codex opencode; do
+  command -v "$p" >/dev/null 2>&1 && paseo provider diagnostic "$p"
+done
+```
+
+Rồi chạy toàn bộ Acceptance §11.
+
+### 13.3. Rollback upgrade Paseo
+
+Nếu upgrade làm vỡ daemon/provider/SSH integration:
+
+1. Không sửa thêm nhiều thứ cùng lúc.
+2. Restore `config.json` backup.
+3. Reinstall known-good CLI:
+   ```bash
+   npm install -g @getpaseo/cli@0.8.0
+   ```
+4. Regenerate systemd unit bằng compatibility block ở §5.4.
+5. Restart:
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user restart paseo-daemon.service
+   ```
+6. Verify daemon + providers + Desktop connection.
+
+### 13.4. Rebuild máy mới
+
+Thứ tự:
+
+```text
+WSL distro
+→ Node/npm
+→ coding agents
+→ Paseo CLI pinned
+→ daemon health
+→ provider diagnostics
+→ sshd
+→ Windows SSH key
+→ hardening
+→ Paseo Desktop Remote SSH
+→ OpenCode workaround CHỈ NẾU issue vẫn tái hiện
+→ acceptance
+```
+
+Không copy workaround OpenCode sang máy mới nếu provider 2.x đã hoạt động bình thường.
+
+---
+
+## 14. File / service inventory cuối cùng
+
+```text
+~/.paseo/config.json
+~/.paseo/daemon.log
+~/.paseo/backups/
+
+~/.config/systemd/user/paseo-daemon.service
+
+~/.ssh/authorized_keys
+
+/etc/ssh/sshd_config.d/99-paseo-wsl.conf
+
+~/.opencode/bin/opencode
+~/.local/bin/opencode -> ~/.opencode/bin/opencode
+~/.local/bin/opencode-paseo-1.18.31   # chỉ khi workaround còn cần
+```
+
+Services:
+
+```text
+ssh.service
+paseo-daemon.service (systemd --user)
+```
+
+Ports:
+
+```text
+127.0.0.1:2222  SSH into WSL
+127.0.0.1:6767  Paseo daemon inside WSL
+```
+
+Không expose `6767` ra LAN/public.
+
+---
+
+## 15. Master acceptance checklist
+
+```text
+[ ] Desktop version captured
+[ ] CLI version captured
+[ ] daemon version captured
+[ ] Node/npm versions captured
+[ ] Claude/Codex/OpenCode versions captured
+
+[ ] NOPASSWD bootstrap file removed
+[ ] SSH PasswordAuthentication no
+[ ] PermitRootLogin no
+[ ] Windows key-auth to 127.0.0.1:2222 PASS
+
+[ ] ssh.service enabled/running
+[ ] paseo-daemon.service enabled/running
+[ ] daemon health PASS
+[ ] daemon listen = 127.0.0.1:6767
+
+[ ] provider diagnostic Claude PASS nếu dùng
+[ ] provider diagnostic Codex PASS nếu dùng
+[ ] provider diagnostic OpenCode PASS nếu dùng
+
+[ ] Paseo Desktop Remote SSH connected
+[ ] Paseo terminal uname = WSL2 Linux
+[ ] pwd/git root = /home/... Linux paths
+[ ] agent read-only smoke test PASS
+
+[ ] config backup tồn tại
+[ ] OpenCode workaround được ghi rõ ENABLED hoặc DECOMMISSIONED
+[ ] nếu workaround ENABLED: interactive=2.x, provider=1.18.31 được verify riêng
+[ ] không có config change chưa backup
+```
+
+Chỉ khi toàn bộ mục liên quan đều PASS mới ghi `Final: PASS`.
+
+## 16. References
 
 - Repo: https://github.com/getpaseo/paseo
 - CLI: https://github.com/getpaseo/paseo/blob/main/public-docs/index.md
@@ -326,11 +575,11 @@ Debug sâu: `ssh -v -p 2222 user@127.0.0.1` (Windows) → phân biệt network v
 
 > Docs trên `main` có thể đi trước snapshot `0.8.0`. Khi rebuild đúng máy/snapshot cũ, ưu tiên behavior đã test + `--help` của binary đang cài; khi upgrade, ưu tiên docs/release notes của version mới và chạy lại acceptance.
 
-## 14. OpenCode: fix lỗi model + terminal profile `terminal exited` (2026-09-20, append-only)
+## 17. OpenCode: fix lỗi model + terminal profile `terminal exited` (2026-09-20, append-only)
 
-> Mục này chỉ ghi thêm thay đổi kỹ thuật đã áp dụng để tracking. Không sửa các mục 1–13.
+> Mục này chỉ ghi thêm thay đổi kỹ thuật đã áp dụng để tracking. Không sửa các mục 0–16.
 
-### 14.1. Lỗi model OpenCode trong Paseo (provider báo `Error`)
+### 17.1. Lỗi model OpenCode trong Paseo (provider báo `Error`)
 
 Triệu chứng: phần model OpenCode trong Paseo báo `Error`; `paseo provider diagnostic opencode` cho `Resolved path: not found`.
 
@@ -339,7 +588,37 @@ Root cause (2 lớp, đã xác minh trên đúng máy này):
 2. Sau khi resolve được, OpenCode `v2.0.10` tự bật password cho `opencode serve` → endpoint `/provider` trả HTTP `401` khi Paseo `0.8.0` gọi không kèm credential (upstream issue getpaseo/paseo#1159). Đã tái hiện: cùng endpoint, `1.18.31` trả HTTP `200` (4 provider, 7.889 model), `2.0.10` trả `401`.
 
 Thay đổi đã áp dụng (giữ nguyên bản chính `v2.0.10` của user tại `~/.opencode/bin/opencode`):
+
+> **Reproducibility note:** original successful setup xác nhận binary `1.18.31` được tải từ release chính thức và checksum khớp, nhưng tài liệu gốc không capture exact release URL + SHA256 literal.  
+> Vì vậy khi rebuild trên máy khác:
+>
+> 1. Lấy binary `1.18.31` từ **official OpenCode release artifact** phù hợp Linux/arch.
+> 2. Xác minh SHA256 theo release metadata chính thức.
+> 3. Không dùng binary không rõ provenance.
+> 4. Sau khi có binary, đặt tên riêng `~/.local/bin/opencode-paseo-1.18.31` và `chmod +x`.
+>
+> **Không invent checksum từ memory.** Nếu không lấy được checksum chính thức thì đánh dấu BLOCKED thay vì bỏ qua verification.
+
+Template kiểm tra sau khi materialize binary:
+
+```bash
+file ~/.local/bin/opencode-paseo-1.18.31
+chmod 0755 ~/.local/bin/opencode-paseo-1.18.31
+~/.local/bin/opencode-paseo-1.18.31 --version
+```
+
+Expected:
+
+```text
+1.18.31
+```
+
 - Tải OpenCode `1.18.31` riêng cho Paseo: `~/.local/bin/opencode-paseo-1.18.31` (binary release chính thức, checksum khớp).
+- **Backup config trước:**
+  ```bash
+  mkdir -p ~/.paseo/backups
+  cp ~/.paseo/config.json ~/.paseo/backups/config.json.$(date +%Y%m%d-%H%M%S).pre-opencode-provider.bak
+  ```
 - Ghim riêng provider trong `~/.paseo/config.json`:
   ```json
   { "agents": { "providers": { "opencode": { "command": ["/home/audition/.local/bin/opencode-paseo-1.18.31"], "enabled": true } } } }
@@ -348,7 +627,7 @@ Thay đổi đã áp dụng (giữ nguyên bản chính `v2.0.10` của user t�
 
 Verify: diagnostic `Version: 1.18.31`, Auth 4 credentials (`~/.local/share/opencode/auth.json`: DeepSeek / Google / OpenCode Go / OpenCode Zen), `Models: 143`, `Status: Ready`.
 
-### 14.2. Terminal profile OpenCode `terminal exited`
+### 17.2. Terminal profile OpenCode `terminal exited`
 
 Triệu chứng: click profile OpenCode trong menu terminal của Paseo → tab `opencode --auto` hiện `Terminal exited` (dòng đỏ dưới cùng), scrollback rỗng (0 dòng), gửi phím không phản hồi. Terminal shell thường trong Paseo vẫn mở bình thường.
 
@@ -360,20 +639,105 @@ Root cause: profile custom trong `~/.paseo/config.json` là `command: "opencode 
 Thay đổi đã áp dụng (revert profile về dạng mặc định của Paseo, giữ nguyên `id` custom `profile_mu9mba45_33p3h53f0c2`):
 - `~/.paseo/config.json` → profile OpenCode: `command: "opencode"`, `args: ["--prompt={{{prompt}}}"]`.
 - Symlink cho daemon `PATH`: `~/.local/bin/opencode` → `/home/audition/.opencode/bin/opencode` (`v2.0.10`, bản hỗ trợ `--prompt`). Thư mục `~/.local/bin` đã nằm trong daemon `PATH` và trong systemd unit (mục 5.4).
-- `paseo reload`. Provider override (mục 14.1) không đổi — terminal và provider cố ý dùng 2 binary khác nhau.
+- `paseo reload`. Provider override (mục 17.1) không đổi — terminal và provider cố ý dùng 2 binary khác nhau.
 
 Verify trong PTY Paseo (đúng 2 dạng lệnh profile sẽ spawn): `opencode --prompt=` và `opencode --prompt=hello` đều sống (bị `timeout` kill sau 5s, RC=124 = process vẫn chạy, không exit).
 
-### 14.3. Gotcha: Paseo web cache terminalProfiles ở phía client
+### 17.3. Gotcha: Paseo web cache terminalProfiles ở phía client
 
 - Web UI gửi `create_terminal_request` kèm `command`+`args` đã expand sẵn từ config mà UI fetch lúc load trang. Sửa file config + `paseo reload` là chưa đủ — phải **hard-refresh trang Paseo (Ctrl+Shift+R)** rồi mới click lại profile.
 - Nút `Edit profiles` trong UI gọi `set_daemon_config` và ghi đè cả file `~/.paseo/config.json` bằng bản cache cũ → đã từng xóa mất fix 1 lần trong lúc sửa. Quy trình an toàn: sửa file → `paseo reload` → hard-refresh UI → mới đụng vào `Edit profiles`/click profile.
 - Các tab chết cũ (scrollback 0 dòng): `paseo terminal kill` báo success nhưng daemon vẫn liệt kê tombstone → đóng tay bằng nút X trong UI.
 
-### 14.4. Trạng thái cuối để đối chiếu khi track
+### 17.4. Trạng thái cuối để đối chiếu khi track
 
 - `~/.local/bin/opencode` → `~/.opencode/bin/opencode` (`v2.0.10`, cho terminal profile).
 - `~/.local/bin/opencode-paseo-1.18.31` (cho provider, qua override).
 - Diagnostic: `which -a opencode` OK, provider `1.18.31 / 143 models / Ready`.
 - Profile OpenCode = factory default (`opencode` + `--prompt={{{prompt}}}`).
-- Nếu terminal ngoài (WSL login shell) gõ `opencode --version` mà ra `1.18.31` thay vì `v2.0.10` thì do `~/.local/bin` đứng trước trong `PATH` — dùng đường dẫn đầy đủ `~/.opencode/bin/opencode` khi cần bản chính.
+- Expected interactive shell state: `opencode --version` phải ra `v2.0.10` vì `~/.local/bin/opencode` là symlink tới `~/.opencode/bin/opencode`.
+- Nếu shell lại resolve `1.18.31`, xem `which -a opencode`, kiểm tra alias/function/PATH và **không đổi provider override** cho tới khi xác định root cause.
+- Binary `1.18.31` chỉ nên được Paseo provider gọi qua **explicit absolute path** `~/.local/bin/opencode-paseo-1.18.31`.
+
+
+### 17.5. Rollback nếu workaround OpenCode làm hỏng provider
+
+Nếu sau khi áp dụng override mà OpenCode provider fail:
+
+1. Dừng chỉnh thêm config.
+2. Restore backup gần nhất ở `~/.paseo/backups/`.
+3. `paseo reload`.
+4. Nếu vẫn còn cache/runtime cũ:
+
+```bash
+systemctl --user restart paseo-daemon.service
+```
+
+5. Verify lại:
+
+```bash
+paseo provider diagnostic opencode
+```
+
+Không xóa binary `v2.0.10` chính của user.
+
+### 17.6. Decommission workaround khi upstream đã fix
+
+Workaround `1.18.31` là **tạm thời**. Khi Paseo/OpenCode release mới đã xử lý auth/401:
+
+1. Ghi version hiện tại:
+   ```bash
+   paseo --version
+   ~/.opencode/bin/opencode --version
+   ```
+2. Backup:
+   ```bash
+   cp ~/.paseo/config.json \
+     ~/.paseo/backups/config.json.$(date +%Y%m%d-%H%M%S).pre-opencode-decommission.bak
+   ```
+3. Bỏ riêng `agents.providers.opencode.command` override, giữ các config khác nguyên vẹn.
+4. `paseo reload`.
+5. Nếu cần:
+   ```bash
+   systemctl --user restart paseo-daemon.service
+   ```
+6. Verify bằng binary 2.x chính:
+   ```bash
+   paseo provider diagnostic opencode
+   ```
+7. Chỉ khi diagnostic = Ready + model discovery + agent test PASS mới xóa:
+   ```bash
+   rm -f ~/.local/bin/opencode-paseo-1.18.31
+   ```
+8. Nếu fail: restore backup và giữ workaround.
+
+**Không xóa workaround chỉ vì đã upgrade version. Xóa khi behavior thực tế đã PASS.**
+
+## 18. Current known-good state summary
+
+```text
+Architecture:
+Windows Paseo Desktop
+  → SSH 127.0.0.1:2222
+  → WSL sshd
+  → Paseo daemon 127.0.0.1:6767
+
+Paseo:
+CLI/daemon known-good = 0.8.0
+
+Security:
+SSH key-auth = required
+PasswordAuthentication = no
+PermitRootLogin = no
+NOPASSWD:ALL = removed after bootstrap
+
+OpenCode:
+interactive terminal profile = v2.0.10
+provider for Paseo 0.8.0 = 1.18.31 workaround
+provider binary path = ~/.local/bin/opencode-paseo-1.18.31
+interactive path = ~/.opencode/bin/opencode
+~/.local/bin/opencode -> ~/.opencode/bin/opencode
+
+Important:
+OpenCode workaround is temporary and must be reevaluated after Paseo/OpenCode upgrades.
+```
